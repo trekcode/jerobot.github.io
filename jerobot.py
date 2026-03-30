@@ -1,11 +1,8 @@
-import yfinance as yf
+import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-import requests
-import time
-import os
-
+import yfinance as yf
+from datetime import datetime
 # ============================================
 # LOW VOLATILITY PAIRS CONFIGURATION
 # ============================================
