@@ -621,8 +621,8 @@ else:
 # Auto-loop
 if st.session_state.auto_enabled:
     st.markdown("---")
-    st.info("🔄 Auto-scan active – checking every 120 seconds...")
-    time.sleep(120)
+    st.info("🔄 Auto-scan active – checking every 60 seconds...")
+    time.sleep(60)
     st.rerun()
 
 st.markdown("---")
