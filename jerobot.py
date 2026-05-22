@@ -1,6 +1,7 @@
 """
 Gold Trading Bot - Scalping / Day Trading / Swing
 Dedicated for XAU/USD with desktop notifications & compact mode
+Fixed KeyError and improved session state handling
 """
 
 import streamlit as st
@@ -41,6 +42,9 @@ class TradingStyle(Enum):
     SWING = "Swing"
     ALL = "Show All"
 
+# List of styles that can actually trade (ALL is a viewer mode)
+TRADABLE_STYLES = [TradingStyle.SCALPING, TradingStyle.DAY_TRADING, TradingStyle.SWING]
+
 @dataclass
 class StyleConfig:
     """Configuration parameters for a trading style"""
@@ -58,7 +62,7 @@ class StyleConfig:
     min_risk_reward: float
     account_balance: float = 100
 
-# Configuration for each style
+# Configuration for each tradable style
 STYLE_CONFIGS = {
     TradingStyle.SCALPING: StyleConfig(
         name="Scalping",
@@ -146,11 +150,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================
-# TELEGRAM FUNCTIONS (unchanged, but updated to use TradingSignal)
+# TELEGRAM FUNCTIONS
 # ============================================
 
 def send_telegram_signal(signal: TradingSignal) -> bool:
-    """Send trading signal to Telegram (updated from scalping version)"""
+    """Send trading signal to Telegram"""
     
     if signal.signal == SignalType.BUY:
         emoji = "🟢"
@@ -248,7 +252,7 @@ def fetch_multi_timeframe_data(timeframes: List[str]) -> dict:
         for tf in timeframes:
             ticker = yf.Ticker('GC=F')
             # yfinance interval mapping
-            interval_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '1h'}  # 4h not directly available, use 1h and resample?
+            interval_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '1h'}  # 4h not directly available, use 1h and resample
             if tf == '4h':
                 df = ticker.history(period='5d', interval='1h')
                 df = df.resample('4H').agg({
@@ -446,9 +450,10 @@ def generate_signal_for_style(style: TradingStyle, data_dict: dict) -> Optional[
 
 class GoldTradingBot:
     def __init__(self):
-        self.signals_sent_today = {style: 0 for style in TradingStyle}
-        self.last_signal_time = {style: None for style in TradingStyle}
-        self.last_signal_key = {style: None for style in TradingStyle}
+        # Only track tradable styles (SCALPING, DAY_TRADING, SWING)
+        self.signals_sent_today = {style: 0 for style in TRADABLE_STYLES}
+        self.last_signal_time = {style: None for style in TRADABLE_STYLES}
+        self.last_signal_key = {style: None for style in TRADABLE_STYLES}
     
     def can_trade(self, style: TradingStyle) -> Tuple[bool, str]:
         config = STYLE_CONFIGS[style]
@@ -491,7 +496,7 @@ class GoldTradingBot:
     
     def analyze_all_styles(self) -> List[TradingSignal]:
         signals = []
-        for style in [TradingStyle.SCALPING, TradingStyle.DAY_TRADING, TradingStyle.SWING]:
+        for style in TRADABLE_STYLES:
             s = self.analyze_style(style)
             if s:
                 signals.append(s)
@@ -530,12 +535,19 @@ def set_compact_mode():
 st.title("🥇 Gold Trading Bot")
 st.write("Scalping | Day Trading | Swing — Signals + Desktop Notifications")
 
-# Initialize bot
+# Initialize bot with safety reset (fixes KeyError from old session state)
 if 'bot' not in st.session_state:
     st.session_state.bot = GoldTradingBot()
     st.session_state.last_signals = []
     st.session_state.auto_enabled = False
     st.session_state.compact_mode = False
+else:
+    # Check if the existing bot has the required attributes (e.g., signals_sent_today for tradable styles)
+    bot = st.session_state.bot
+    if not hasattr(bot, 'signals_sent_today') or not all(style in bot.signals_sent_today for style in TRADABLE_STYLES):
+        # Reinitialize bot with correct structure
+        st.session_state.bot = GoldTradingBot()
+        st.session_state.last_signals = []
 
 # Sidebar
 with st.sidebar:
@@ -549,8 +561,9 @@ with st.sidebar:
     
     st.divider()
     st.subheader("📊 Today's Signals")
-    for style in [TradingStyle.SCALPING, TradingStyle.DAY_TRADING, TradingStyle.SWING]:
-        sent = st.session_state.bot.signals_sent_today[style]
+    for style in TRADABLE_STYLES:
+        # Use .get() for safety, but keys should exist after reinitialization
+        sent = st.session_state.bot.signals_sent_today.get(style, 0)
         max_t = STYLE_CONFIGS[style].max_trades_per_day
         st.metric(f"{style.value}", f"{sent} / {max_t}")
     
