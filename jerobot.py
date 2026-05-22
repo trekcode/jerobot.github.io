@@ -1,6 +1,6 @@
 """
-Gold Scalping Bot - Dedicated for XAU/USD
-Optimized for quick entries/exits with tight stops
+Gold Trading Bot - Scalping / Day Trading / Swing
+Dedicated for XAU/USD with desktop notifications & compact mode
 """
 
 import streamlit as st
@@ -11,58 +11,122 @@ from datetime import datetime, timedelta
 import time
 import requests
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from dataclasses import dataclass
 from enum import Enum
+
+# Try to import desktop notification library
+try:
+    from plyer import notification
+    DESKTOP_NOTIFY_AVAILABLE = True
+except ImportError:
+    DESKTOP_NOTIFY_AVAILABLE = False
+    logging.warning("plyer not installed. Desktop notifications disabled. Install with: pip install plyer")
 
 # ============================================
 # CONFIGURATION
 # ============================================
 
-# Telegram for Gold Bot
+# Telegram for Gold Bot (unchanged)
 GOLD_BOT_TOKEN = "8686418191:AAHtEBJ9Lyehb3geZS1WwWukmYZatqpAe-A"
 GOLD_BOT_CHAT_ID = "2057396237"
 
-# Scalping Parameters
-SCALP_ACCOUNT_BALANCE = 100  # $100 account
-SCALP_RISK_PER_TRADE = 0.5  # 0.5% risk per scalp (lower for scalping)
-MIN_SCALP_CONFIDENCE = 65
-MAX_SCALP_TRADES_PER_DAY = 10
-SCALP_HOLD_MINUTES = 15  # Max hold time in minutes
+# ============================================
+# TRADING STYLES & PARAMETERS
+# ============================================
 
-# Scalping Indicators
-RSI_SCALP_BUY = 30  # Lower threshold for scalp buys
-RSI_SCALP_SELL = 70  # Higher threshold for scalp sells
-VOLUME_SPIKE_THRESHOLD = 1.5  # 150% of average volume
-ATR_MULTIPLIER_SL = 1.0  # Tighter stop for scalping
-ATR_MULTIPLIER_TP = 1.5  # Tighter target for scalping
+class TradingStyle(Enum):
+    SCALPING = "Scalping"
+    DAY_TRADING = "Day Trading"
+    SWING = "Swing"
+    ALL = "Show All"
 
-# Session Times (UTC) - Best for Gold
-GOLD_SESSIONS = {
-    'London': (8, 16),
-    'New York': (13, 21),
-    'Asian': (23, 8)
+@dataclass
+class StyleConfig:
+    """Configuration parameters for a trading style"""
+    name: str
+    timeframes: Tuple[str, ...]          # e.g. ('1m', '5m', '15m')
+    risk_per_trade: float                # % of account
+    min_confidence: int
+    max_trades_per_day: int
+    hold_minutes: int
+    rsi_buy_threshold: int
+    rsi_sell_threshold: int
+    volume_spike_threshold: float
+    atr_multiplier_sl: float
+    atr_multiplier_tp: float
+    min_risk_reward: float
+    account_balance: float = 100
+
+# Configuration for each style
+STYLE_CONFIGS = {
+    TradingStyle.SCALPING: StyleConfig(
+        name="Scalping",
+        timeframes=('1m', '5m', '15m'),
+        risk_per_trade=0.5,
+        min_confidence=65,
+        max_trades_per_day=10,
+        hold_minutes=15,
+        rsi_buy_threshold=30,
+        rsi_sell_threshold=70,
+        volume_spike_threshold=1.5,
+        atr_multiplier_sl=1.0,
+        atr_multiplier_tp=1.5,
+        min_risk_reward=1.5,
+        account_balance=100
+    ),
+    TradingStyle.DAY_TRADING: StyleConfig(
+        name="Day Trading",
+        timeframes=('5m', '15m', '1h'),
+        risk_per_trade=1.0,
+        min_confidence=70,
+        max_trades_per_day=5,
+        hold_minutes=120,
+        rsi_buy_threshold=35,
+        rsi_sell_threshold=65,
+        volume_spike_threshold=1.3,
+        atr_multiplier_sl=1.5,
+        atr_multiplier_tp=2.5,
+        min_risk_reward=2.0,
+        account_balance=100
+    ),
+    TradingStyle.SWING: StyleConfig(
+        name="Swing",
+        timeframes=('15m', '1h', '4h'),
+        risk_per_trade=2.0,
+        min_confidence=75,
+        max_trades_per_day=2,
+        hold_minutes=1440,   # 1 day
+        rsi_buy_threshold=25,
+        rsi_sell_threshold=75,
+        volume_spike_threshold=1.2,
+        atr_multiplier_sl=2.0,
+        atr_multiplier_tp=3.0,
+        min_risk_reward=2.5,
+        account_balance=100
+    ),
 }
 
 # ============================================
 # DATA CLASSES
 # ============================================
 
-class ScalpSignalType(Enum):
+class SignalType(Enum):
     BUY = "BUY"
     SELL = "SELL"
     NEUTRAL = "NEUTRAL"
 
 @dataclass
-class ScalpSignal:
-    """Scalping trade signal"""
-    signal: ScalpSignalType
+class TradingSignal:
+    """Unified trade signal for any style"""
+    style: TradingStyle
+    signal: SignalType
     entry: float
     stop_loss: float
     take_profit: float
     confidence: int
-    rsi_1m: float
-    rsi_5m: float
+    rsi_fast: float      # fast timeframe RSI
+    rsi_slow: float      # slower timeframe RSI
     volume_ratio: float
     session: str
     risk_reward: float
@@ -77,36 +141,41 @@ class ScalpSignal:
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('gold_scalp.log'), logging.StreamHandler()]
+    handlers=[logging.FileHandler('gold_trading.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 # ============================================
-# TELEGRAM FUNCTIONS
+# TELEGRAM FUNCTIONS (unchanged, but updated to use TradingSignal)
 # ============================================
 
-def send_gold_signal(signal: ScalpSignal) -> bool:
-    """Send gold scalping signal to Telegram"""
+def send_telegram_signal(signal: TradingSignal) -> bool:
+    """Send trading signal to Telegram (updated from scalping version)"""
     
-    if signal.signal == ScalpSignalType.BUY:
-        emoji = "🟢⚡"
+    if signal.signal == SignalType.BUY:
+        emoji = "🟢"
         action = "BUY"
-        direction = "▲"
     else:
-        emoji = "🔴⚡"
+        emoji = "🔴"
         action = "SELL"
-        direction = "▼"
+    
+    # Style-specific emoji
+    style_emoji = {
+        TradingStyle.SCALPING: "⚡",
+        TradingStyle.DAY_TRADING: "📈",
+        TradingStyle.SWING: "🐢"
+    }.get(signal.style, "")
     
     # Determine strength
-    if signal.confidence >= 80:
-        strength = "🔥 STRONG SCALP"
+    if signal.confidence >= 85:
+        strength = "🔥 STRONG SIGNAL"
     elif signal.confidence >= 70:
-        strength = "⚡ SCALP OPPORTUNITY"
+        strength = "✅ GOOD OPPORTUNITY"
     else:
-        strength = "📊 SCALP ALERT"
+        strength = "📊 TRADE ALERT"
     
     message = f"""
-{emoji} <b>GOLD SCALP {action}</b>
+{emoji}{style_emoji} <b>{signal.style.value} {action}</b>
 
 <b>{strength}</b>
 <b>Confidence:</b> {signal.confidence}%
@@ -118,20 +187,19 @@ def send_gold_signal(signal: ScalpSignal) -> bool:
 • Risk/Reward: 1:{signal.risk_reward:.1f}
 
 <b>📊 Technicals:</b>
-• RSI (1m): {signal.rsi_1m:.1f}
-• RSI (5m): {signal.rsi_5m:.1f}
+• RSI (fast): {signal.rsi_fast:.1f}
+• RSI (slow): {signal.rsi_slow:.1f}
 • Volume Ratio: {signal.volume_ratio:.1f}x
 
 <b>📋 Position:</b>
 • Lot Size: {signal.lot_size:.2f}
-• Risk Amount: ${SCALP_ACCOUNT_BALANCE * SCALP_RISK_PER_TRADE / 100:.2f}
+• Risk Amount: ${STYLE_CONFIGS[signal.style].account_balance * STYLE_CONFIGS[signal.style].risk_per_trade / 100:.2f}
 
 <b>⏰ Timing:</b>
 • Session: {signal.session}
-• Expires: {signal.expiry.strftime('%H:%M')} UTC ({SCALP_HOLD_MINUTES} min)
+• Expires: {signal.expiry.strftime('%H:%M')} UTC ({STYLE_CONFIGS[signal.style].hold_minutes} min)
 
-<i>⚡ Scalping Tip: Quick entry/exit within 5-15 minutes</i>
-<i>⚠️ High risk - Use tight stops!</i>
+<i>📌 Trade according to style: {signal.style.value}</i>
 """
     
     try:
@@ -149,376 +217,400 @@ def send_gold_signal(signal: ScalpSignal) -> bool:
         return False
 
 # ============================================
-# GOLD SCALPING ANALYSIS
+# DESKTOP NOTIFICATION
 # ============================================
 
-def fetch_gold_data() -> Optional[Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
-    """Fetch gold data for multiple timeframes"""
+def send_desktop_notification(signal: TradingSignal):
+    """Send a native desktop notification"""
+    if not DESKTOP_NOTIFY_AVAILABLE:
+        return
+    
+    title = f"{signal.style.value} {signal.signal.value} Signal"
+    message = f"Gold ${signal.entry:.2f}\nSL: {signal.stop_loss:.2f}  TP: {signal.take_profit:.2f}\nConfidence: {signal.confidence}%"
+    
     try:
-        df_1m = yf.Ticker('GC=F').history(period='1d', interval='1m')
-        df_5m = yf.Ticker('GC=F').history(period='1d', interval='5m')
-        df_15m = yf.Ticker('GC=F').history(period='1d', interval='15m')
-        
-        if len(df_1m) < 20:
-            return None
-        
-        return df_1m, df_5m, df_15m
-        
+        notification.notify(
+            title=title,
+            message=message,
+            timeout=5
+        )
     except Exception as e:
-        logger.error(f"Gold data fetch error: {e}")
+        logger.warning(f"Desktop notification failed: {e}")
+
+# ============================================
+# DATA FETCHING (multi timeframe)
+# ============================================
+
+def fetch_multi_timeframe_data(timeframes: List[str]) -> dict:
+    """Fetch gold data for multiple timeframes"""
+    data_dict = {}
+    try:
+        for tf in timeframes:
+            ticker = yf.Ticker('GC=F')
+            # yfinance interval mapping
+            interval_map = {'1m': '1m', '5m': '5m', '15m': '15m', '1h': '1h', '4h': '1h'}  # 4h not directly available, use 1h and resample?
+            if tf == '4h':
+                df = ticker.history(period='5d', interval='1h')
+                df = df.resample('4H').agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last',
+                    'Volume': 'sum'
+                }).dropna()
+            else:
+                df = ticker.history(period='2d', interval=interval_map.get(tf, '5m'))
+            if len(df) >= 20:
+                data_dict[tf] = df
+        return data_dict if data_dict else None
+    except Exception as e:
+        logger.error(f"Data fetch error: {e}")
         return None
 
-def calculate_scalp_indicators(df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> dict:
-    """Calculate scalping indicators"""
+# ============================================
+# INDICATOR CALCULATIONS (style-aware)
+# ============================================
+
+def calculate_indicators(df: pd.DataFrame, rsi_period: int = 7) -> dict:
+    """Calculate common indicators for a given DataFrame"""
     try:
-        # Current price
-        current = df_1m['Close'].iloc[-1]
+        current = df['Close'].iloc[-1]
         
-        # 1-minute EMAs
-        ema_5 = df_1m['Close'].ewm(span=5, adjust=False).mean().iloc[-1]
-        ema_10 = df_1m['Close'].ewm(span=10, adjust=False).mean().iloc[-1]
+        # EMAs
+        ema_fast = df['Close'].ewm(span=5, adjust=False).mean().iloc[-1]
+        ema_slow = df['Close'].ewm(span=10, adjust=False).mean().iloc[-1]
         
-        # 1-minute RSI (7 period for scalping)
-        delta = df_1m['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(7).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(7).mean()
+        # RSI
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(rsi_period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean()
         rs = gain / loss
-        rsi_1m = 100 - (100 / (1 + rs)).iloc[-1]
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
         
-        # 1-minute ATR
-        high_low = df_1m['High'] - df_1m['Low']
-        high_close = abs(df_1m['High'] - df_1m['Close'].shift())
-        low_close = abs(df_1m['Low'] - df_1m['Close'].shift())
+        # ATR
+        high_low = df['High'] - df['Low']
+        high_close = abs(df['High'] - df['Close'].shift())
+        low_close = abs(df['Low'] - df['Close'].shift())
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        atr_1m = tr.rolling(7).mean().iloc[-1]
+        atr = tr.rolling(7).mean().iloc[-1]
         
         # Volume ratio
-        volume_sma = df_1m['Volume'].rolling(10).mean().iloc[-1]
-        current_volume = df_1m['Volume'].iloc[-1]
-        volume_ratio = current_volume / volume_sma if volume_sma > 0 else 1
+        vol_sma = df['Volume'].rolling(10).mean().iloc[-1]
+        vol_ratio = df['Volume'].iloc[-1] / vol_sma if vol_sma > 0 else 1
         
-        # 5-minute RSI
-        if len(df_5m) > 5:
-            delta_5m = df_5m['Close'].diff()
-            gain_5m = (delta_5m.where(delta_5m > 0, 0)).rolling(7).mean()
-            loss_5m = (-delta_5m.where(delta_5m < 0, 0)).rolling(7).mean()
-            rs_5m = gain_5m / loss_5m
-            rsi_5m = 100 - (100 / (1 + rs_5m)).iloc[-1]
-        else:
-            rsi_5m = 50
-        
-        # Candlestick patterns
-        body = abs(df_1m['Close'].iloc[-1] - df_1m['Open'].iloc[-1])
-        range_ = df_1m['High'].iloc[-1] - df_1m['Low'].iloc[-1]
-        candle_strength = body / range_ if range_ > 0 else 0
+        # Candle strength
+        body = abs(df['Close'].iloc[-1] - df['Open'].iloc[-1])
+        candle_range = df['High'].iloc[-1] - df['Low'].iloc[-1]
+        candle_strength = body / candle_range if candle_range > 0 else 0
         
         return {
             'current': current,
-            'ema_5': ema_5,
-            'ema_10': ema_10,
-            'rsi_1m': rsi_1m,
-            'rsi_5m': rsi_5m,
-            'atr': atr_1m,
-            'volume_ratio': volume_ratio,
+            'ema_fast': ema_fast,
+            'ema_slow': ema_slow,
+            'rsi': rsi,
+            'atr': atr,
+            'volume_ratio': vol_ratio,
             'candle_strength': candle_strength
         }
-        
     except Exception as e:
-        logger.error(f"Indicator calculation error: {e}")
-        return None
-
-def generate_scalp_signal(indicators: dict) -> Optional[ScalpSignal]:
-    """Generate scalping signal based on indicators"""
-    try:
-        buy_score = 0
-        sell_score = 0
-        
-        current = indicators['current']
-        
-        # 1. EMA alignment
-        if current > indicators['ema_5'] > indicators['ema_10']:
-            buy_score += 2
-        elif current < indicators['ema_5'] < indicators['ema_10']:
-            sell_score += 2
-        
-        # 2. RSI thresholds (tighter for scalping)
-        if indicators['rsi_1m'] < RSI_SCALP_BUY:
-            buy_score += 3
-        elif indicators['rsi_1m'] > RSI_SCALP_SELL:
-            sell_score += 3
-        elif indicators['rsi_1m'] < 40:
-            buy_score += 1
-        elif indicators['rsi_1m'] > 60:
-            sell_score += 1
-        
-        # 3. Volume confirmation
-        if indicators['volume_ratio'] > VOLUME_SPIKE_THRESHOLD:
-            if indicators['candle_strength'] > 0.6:
-                if current > indicators['ema_5']:
-                    buy_score += 2
-                else:
-                    sell_score += 2
-        
-        # 4. 5-minute momentum
-        if indicators['rsi_5m'] < 40:
-            buy_score += 1
-        elif indicators['rsi_5m'] > 60:
-            sell_score += 1
-        
-        # 5. Candle strength
-        if indicators['candle_strength'] > 0.7:
-            if indicators['rsi_1m'] < 50:
-                buy_score += 1
-            else:
-                sell_score += 1
-        
-        # Determine signal
-        total_score = buy_score + sell_score
-        if total_score == 0:
-            return None
-        
-        if buy_score > sell_score and buy_score >= 3:
-            signal = ScalpSignalType.BUY
-            confidence = min(90, 50 + int((buy_score / total_score) * 50))
-            
-            # Tight scalping levels
-            stop_loss = current - (indicators['atr'] * ATR_MULTIPLIER_SL)
-            take_profit = current + (indicators['atr'] * ATR_MULTIPLIER_TP)
-            
-        elif sell_score > buy_score and sell_score >= 3:
-            signal = ScalpSignalType.SELL
-            confidence = min(90, 50 + int((sell_score / total_score) * 50))
-            
-            stop_loss = current + (indicators['atr'] * ATR_MULTIPLIER_SL)
-            take_profit = current - (indicators['atr'] * ATR_MULTIPLIER_TP)
-        else:
-            return None
-        
-        # Check confidence
-        if confidence < MIN_SCALP_CONFIDENCE:
-            return None
-        
-        # Calculate risk/reward
-        risk = abs(current - stop_loss)
-        reward = abs(take_profit - current)
-        risk_reward = reward / risk if risk > 0 else 0
-        
-        if risk_reward < 1.5:
-            return None
-        
-        # Calculate lot size for scalping
-        stop_pips = risk * 100  # Convert to pips
-        risk_amount = SCALP_ACCOUNT_BALANCE * (SCALP_RISK_PER_TRADE / 100)
-        lot_size = risk_amount / (stop_pips * 0.1)  # $0.1 per pip for gold
-        lot_size = max(0.01, min(1.0, round(lot_size, 2)))
-        
-        # Get current session
-        current_hour = datetime.utcnow().hour
-        if 8 <= current_hour < 16:
-            session = "London"
-        elif 13 <= current_hour < 21:
-            session = "New York"
-        else:
-            session = "Asian"
-        
-        return ScalpSignal(
-            signal=signal,
-            entry=current,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            confidence=confidence,
-            rsi_1m=indicators['rsi_1m'],
-            rsi_5m=indicators['rsi_5m'],
-            volume_ratio=indicators['volume_ratio'],
-            session=session,
-            risk_reward=risk_reward,
-            timestamp=datetime.now(),
-            expiry=datetime.now() + timedelta(minutes=SCALP_HOLD_MINUTES),
-            lot_size=lot_size
-        )
-        
-    except Exception as e:
-        logger.error(f"Signal generation error: {e}")
+        logger.error(f"Indicator error: {e}")
         return None
 
 # ============================================
-# SCALPING BOT CLASS
+# SIGNAL GENERATION PER STYLE
 # ============================================
 
-class GoldScalpingBot:
-    """Dedicated gold scalping bot"""
+def generate_signal_for_style(style: TradingStyle, data_dict: dict) -> Optional[TradingSignal]:
+    """Generate a signal for a given trading style using its own config and timeframes"""
+    config = STYLE_CONFIGS[style]
     
+    # Fetch required timeframes
+    tf_fast, tf_slow, _ = config.timeframes
+    if tf_fast not in data_dict or tf_slow not in data_dict:
+        return None
+    
+    df_fast = data_dict[tf_fast]
+    df_slow = data_dict[tf_slow]
+    
+    ind_fast = calculate_indicators(df_fast)
+    ind_slow = calculate_indicators(df_slow)
+    if not ind_fast or not ind_slow:
+        return None
+    
+    current = ind_fast['current']
+    
+    # Scoring system
+    buy_score = 0
+    sell_score = 0
+    
+    # 1. EMA alignment
+    if current > ind_fast['ema_fast'] > ind_fast['ema_slow']:
+        buy_score += 2
+    elif current < ind_fast['ema_fast'] < ind_fast['ema_slow']:
+        sell_score += 2
+    
+    # 2. RSI thresholds
+    if ind_fast['rsi'] < config.rsi_buy_threshold:
+        buy_score += 3
+    elif ind_fast['rsi'] > config.rsi_sell_threshold:
+        sell_score += 3
+    elif ind_fast['rsi'] < (config.rsi_buy_threshold + 10):
+        buy_score += 1
+    elif ind_fast['rsi'] > (config.rsi_sell_threshold - 10):
+        sell_score += 1
+    
+    # 3. Volume spike
+    if ind_fast['volume_ratio'] > config.volume_spike_threshold:
+        if ind_fast['candle_strength'] > 0.6:
+            if current > ind_fast['ema_fast']:
+                buy_score += 2
+            else:
+                sell_score += 2
+    
+    # 4. Slower timeframe momentum
+    if ind_slow['rsi'] < 50:
+        buy_score += 1
+    elif ind_slow['rsi'] > 50:
+        sell_score += 1
+    
+    # 5. Candle strength
+    if ind_fast['candle_strength'] > 0.7:
+        if ind_fast['rsi'] < 50:
+            buy_score += 1
+        else:
+            sell_score += 1
+    
+    total_score = buy_score + sell_score
+    if total_score == 0:
+        return None
+    
+    # Determine direction and confidence
+    if buy_score > sell_score and buy_score >= 3:
+        signal_type = SignalType.BUY
+        confidence = min(95, 50 + int((buy_score / total_score) * 50))
+        stop_loss = current - (ind_fast['atr'] * config.atr_multiplier_sl)
+        take_profit = current + (ind_fast['atr'] * config.atr_multiplier_tp)
+    elif sell_score > buy_score and sell_score >= 3:
+        signal_type = SignalType.SELL
+        confidence = min(95, 50 + int((sell_score / total_score) * 50))
+        stop_loss = current + (ind_fast['atr'] * config.atr_multiplier_sl)
+        take_profit = current - (ind_fast['atr'] * config.atr_multiplier_tp)
+    else:
+        return None
+    
+    if confidence < config.min_confidence:
+        return None
+    
+    # Risk/Reward
+    risk = abs(current - stop_loss)
+    reward = abs(take_profit - current)
+    rr = reward / risk if risk > 0 else 0
+    if rr < config.min_risk_reward:
+        return None
+    
+    # Lot size
+    stop_pips = risk * 100
+    risk_amount = config.account_balance * (config.risk_per_trade / 100)
+    lot_size = risk_amount / (stop_pips * 0.1)
+    lot_size = max(0.01, min(1.0, round(lot_size, 2)))
+    
+    # Session detection
+    hour = datetime.utcnow().hour
+    if 8 <= hour < 16:
+        session = "London"
+    elif 13 <= hour < 21:
+        session = "New York"
+    else:
+        session = "Asian"
+    
+    return TradingSignal(
+        style=style,
+        signal=signal_type,
+        entry=current,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        confidence=confidence,
+        rsi_fast=ind_fast['rsi'],
+        rsi_slow=ind_slow['rsi'],
+        volume_ratio=ind_fast['volume_ratio'],
+        session=session,
+        risk_reward=rr,
+        timestamp=datetime.now(),
+        expiry=datetime.now() + timedelta(minutes=config.hold_minutes),
+        lot_size=lot_size
+    )
+
+# ============================================
+# TRADING BOT CLASS (supports multiple styles)
+# ============================================
+
+class GoldTradingBot:
     def __init__(self):
-        self.signals_sent_today = 0
-        self.last_signal_time = None
-        self.last_signal_key = None
+        self.signals_sent_today = {style: 0 for style in TradingStyle}
+        self.last_signal_time = {style: None for style in TradingStyle}
+        self.last_signal_key = {style: None for style in TradingStyle}
+    
+    def can_trade(self, style: TradingStyle) -> Tuple[bool, str]:
+        config = STYLE_CONFIGS[style]
+        if self.signals_sent_today[style] >= config.max_trades_per_day:
+            return False, f"Max {config.max_trades_per_day} {style.value} trades per day"
         
-    def can_scalp(self) -> bool:
-        """Check if we can scalp"""
-        if self.signals_sent_today >= MAX_SCALP_TRADES_PER_DAY:
-            return False, f"Max {MAX_SCALP_TRADES_PER_DAY} scalp trades per day"
-        
-        if self.last_signal_time:
-            time_diff = (datetime.now() - self.last_signal_time).total_seconds()
-            if time_diff < 60:  # 1 minute cooldown
-                return False, "Too frequent (1 min cooldown)"
-        
+        last = self.last_signal_time[style]
+        if last:
+            if (datetime.now() - last).total_seconds() < 60:
+                return False, "Cooldown 1 min"
         return True, "OK"
     
-    def analyze(self) -> Optional[ScalpSignal]:
-        """Run gold scalping analysis"""
-        
-        # Check if we can scalp
-        can_scalp, reason = self.can_scalp()
-        if not can_scalp:
-            logger.info(f"Scalping blocked: {reason}")
+    def analyze_style(self, style: TradingStyle) -> Optional[TradingSignal]:
+        can, reason = self.can_trade(style)
+        if not can:
+            logger.info(f"{style.value} blocked: {reason}")
             return None
         
-        # Fetch data
-        data = fetch_gold_data()
-        if not data:
+        config = STYLE_CONFIGS[style]
+        timeframes = list(config.timeframes)
+        data_dict = fetch_multi_timeframe_data(timeframes)
+        if not data_dict:
             return None
         
-        df_1m, df_5m, df_15m = data
-        
-        # Calculate indicators
-        indicators = calculate_scalp_indicators(df_1m, df_5m)
-        if not indicators:
-            return None
-        
-        # Generate signal
-        signal = generate_scalp_signal(indicators)
+        signal = generate_signal_for_style(style, data_dict)
         if not signal:
             return None
         
-        # Prevent duplicate signals
-        signal_key = f"{signal.signal.value}_{signal.entry:.1f}"
-        if signal_key == self.last_signal_key:
+        # Duplicate check
+        signal_key = f"{signal.style.value}_{signal.signal.value}_{signal.entry:.1f}"
+        if signal_key == self.last_signal_key[style]:
             return None
         
         # Update state
-        self.signals_sent_today += 1
-        self.last_signal_time = datetime.now()
-        self.last_signal_key = signal_key
+        self.signals_sent_today[style] += 1
+        self.last_signal_time[style] = datetime.now()
+        self.last_signal_key[style] = signal_key
         
         return signal
+    
+    def analyze_all_styles(self) -> List[TradingSignal]:
+        signals = []
+        for style in [TradingStyle.SCALPING, TradingStyle.DAY_TRADING, TradingStyle.SWING]:
+            s = self.analyze_style(style)
+            if s:
+                signals.append(s)
+        return signals
 
 # ============================================
 # STREAMLIT UI
 # ============================================
 
-st.set_page_config(page_title="Gold Scalping Bot", layout="wide")
+st.set_page_config(page_title="Gold Trading Bot", layout="wide")
 
-st.title("🥇 Gold Scalping Bot")
-st.write("Dedicated scalping signals for XAU/USD | Tight stops | Quick entries")
+# Compact mode CSS
+def set_compact_mode():
+    st.markdown("""
+    <style>
+        .main .block-container {
+            padding-top: 1rem;
+            padding-bottom: 0rem;
+        }
+        .stMetric {
+            font-size: 0.8rem;
+        }
+        h1, h2, h3 {
+            margin-top: 0rem;
+            margin-bottom: 0.5rem;
+        }
+        .stButton button {
+            padding: 0.2rem 0.5rem;
+        }
+        hr {
+            margin: 0.5rem 0rem;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.title("🥇 Gold Trading Bot")
+st.write("Scalping | Day Trading | Swing — Signals + Desktop Notifications")
 
 # Initialize bot
-if 'scalp_bot' not in st.session_state:
-    st.session_state.scalp_bot = GoldScalpingBot()
-    st.session_state.last_scalp_signal = None
-    st.session_state.auto_scalp = False
+if 'bot' not in st.session_state:
+    st.session_state.bot = GoldTradingBot()
+    st.session_state.last_signals = []
+    st.session_state.auto_enabled = False
+    st.session_state.compact_mode = False
 
 # Sidebar
 with st.sidebar:
-    st.header("⚡ Scalping Settings")
+    st.header("⚙️ Settings")
+    trading_style = st.selectbox("Trading Style", [s.value for s in TradingStyle], index=0)
+    selected_style = TradingStyle(trading_style)
     
-    st.subheader("💰 Risk Management")
-    st.metric("Account Balance", f"${SCALP_ACCOUNT_BALANCE}")
-    st.metric("Risk per Trade", f"{SCALP_RISK_PER_TRADE}%")
-    st.metric("Max Trades/Day", MAX_SCALP_TRADES_PER_DAY)
+    st.session_state.compact_mode = st.checkbox("📱 Compact Mode (mini app view)", value=st.session_state.compact_mode)
+    if st.session_state.compact_mode:
+        set_compact_mode()
     
-    st.subheader("🎯 Signal Filters")
-    st.metric("Min Confidence", f"{MIN_SCALP_CONFIDENCE}%")
-    st.metric("Min R/R", "1:1.5")
-    st.metric("Hold Time", f"{SCALP_HOLD_MINUTES} min")
+    st.divider()
+    st.subheader("📊 Today's Signals")
+    for style in [TradingStyle.SCALPING, TradingStyle.DAY_TRADING, TradingStyle.SWING]:
+        sent = st.session_state.bot.signals_sent_today[style]
+        max_t = STYLE_CONFIGS[style].max_trades_per_day
+        st.metric(f"{style.value}", f"{sent} / {max_t}")
     
-    st.subheader("📊 Today's Stats")
-    st.metric("Signals Sent", st.session_state.scalp_bot.signals_sent_today)
-    st.metric("Remaining", MAX_SCALP_TRADES_PER_DAY - st.session_state.scalp_bot.signals_sent_today)
+    st.divider()
+    st.session_state.auto_enabled = st.checkbox("⚡ Auto-Scan (every 2 min)", value=st.session_state.auto_enabled)
     
-    # Auto-scalp toggle
-    st.session_state.auto_scalp = st.checkbox("⚡ Auto-Scalp (every 2 min)", value=False)
-    
-    # Manual button
-    if st.button("🔍 Check Gold NOW", use_container_width=True):
+    if st.button("🔍 Scan Now", use_container_width=True):
         st.rerun()
 
-# Manual or auto analysis
-should_analyze = st.button("🚀 Generate Scalp Signal", use_container_width=True) or st.session_state.auto_scalp
+# Main panel action
+do_scan = st.button("🚀 Generate Signal(s)", use_container_width=True) or st.session_state.auto_enabled
 
-if should_analyze:
-    with st.spinner("Analyzing gold for scalp opportunities..."):
-        signal = st.session_state.scalp_bot.analyze()
-        st.session_state.last_scalp_signal = signal
-        
-        if signal:
-            # Send to Telegram
-            success = send_gold_signal(signal)
-            if success:
-                st.success(f"✅ {signal.signal.value} SCALP SIGNAL SENT!")
-            else:
-                st.error("Failed to send Telegram notification")
+if do_scan:
+    with st.spinner("Analyzing gold..."):
+        if selected_style == TradingStyle.ALL:
+            signals = st.session_state.bot.analyze_all_styles()
         else:
-            st.info("⚖️ No scalp signal at this time")
+            sig = st.session_state.bot.analyze_style(selected_style)
+            signals = [sig] if sig else []
+        
+        st.session_state.last_signals = signals
+        
+        for sig in signals:
+            # Telegram and desktop notification
+            send_telegram_signal(sig)
+            send_desktop_notification(sig)
+        
+        if signals:
+            st.success(f"✅ {len(signals)} signal(s) generated and sent!")
+        else:
+            st.info("⏳ No trading opportunity at this moment.")
 
-# Display last signal
-st.markdown("## 🎯 LAST SCALP SIGNAL")
+# Display signals
+st.markdown("## 🎯 Latest Signal(s)")
 
-if st.session_state.last_scalp_signal:
-    s = st.session_state.last_scalp_signal
-    
-    if s.signal == ScalpSignalType.BUY:
-        color = "#1a472a"
-        border = "#ffff00"
-        emoji = "🟢⚡"
-    else:
-        color = "#471a1a"
-        border = "#ffaa00"
-        emoji = "🔴⚡"
-    
-    st.markdown(f"""
-    <div style="background: {color}; border-left: 5px solid {border}; padding: 20px; border-radius: 10px;">
-        <h2>{emoji} {s.signal.value} GOLD SCALP</h2>
-        <table style="width: 100%;">
-            <tr>
-                <td><b>💰 Entry:</b></td><td>${s.entry:.2f}</td>
-                <td><b>🎯 Confidence:</b></td><td>{s.confidence}%</td>
-            </tr>
-            <tr>
-                <td><b>🛑 Stop Loss:</b></td><td>${s.stop_loss:.2f}</td>
-                <td><b>🎯 Take Profit:</b></td><td>${s.take_profit:.2f}</td>
-            </tr>
-            <tr>
-                <td><b>📊 RSI (1m):</b></td><td>{s.rsi_1m:.1f}</td>
-                <td><b>📊 RSI (5m):</b></td><td>{s.rsi_5m:.1f}</td>
-            </tr>
-            <tr>
-                <td><b>📈 Volume:</b></td><td>{s.volume_ratio:.1f}x avg</td>
-                <td><b>📊 Risk/Reward:</b></td><td>1:{s.risk_reward:.1f}</td>
-            </tr>
-            <tr>
-                <td><b>💼 Lot Size:</b></td><td>{s.lot_size:.2f}</td>
-                <td><b>⏰ Expires:</b></td><td>{s.expiry.strftime('%H:%M:%S')} UTC</td>
-            </tr>
-        </table>
-    </div>
-    """, unsafe_allow_html=True)
+if st.session_state.last_signals:
+    cols = st.columns(min(len(st.session_state.last_signals), 3))
+    for idx, sig in enumerate(st.session_state.last_signals):
+        with cols[idx % 3]:
+            bg_color = "#1a472a" if sig.signal == SignalType.BUY else "#471a1a"
+            border_color = "#ffff00" if sig.signal == SignalType.BUY else "#ffaa00"
+            emoji = "🟢" if sig.signal == SignalType.BUY else "🔴"
+            st.markdown(f"""
+            <div style="background: {bg_color}; border-left: 4px solid {border_color}; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
+                <b>{emoji} {sig.style.value} {sig.signal.value}</b><br>
+                Entry: ${sig.entry:.2f}<br>
+                SL: ${sig.stop_loss:.2f}  TP: ${sig.take_profit:.2f}<br>
+                Conf: {sig.confidence}%  R/R: 1:{sig.risk_reward:.1f}<br>
+                Expires: {sig.expiry.strftime('%H:%M')}
+            </div>
+            """, unsafe_allow_html=True)
 else:
-    st.info("No scalp signal generated yet. Click 'Generate Scalp Signal' to start.")
+    st.info("No signal yet. Click 'Scan Now' to start.")
 
-# Auto-scalp logic
-if st.session_state.auto_scalp:
+# Auto-loop
+if st.session_state.auto_enabled:
     st.markdown("---")
-    st.info("⚡ Auto-scalp enabled - Checking every 2 minutes...")
+    st.info("🔄 Auto-scan active – checking every 120 seconds...")
     time.sleep(120)
     st.rerun()
 
-# Footer
 st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: gray;'>
-    <p>⚠️ <b>Educational purposes only</b> - High risk strategy!</p>
-    <p>⚡ Scalping requires fast execution and tight risk management</p>
-    <p>📊 Signals based on: 1m/5m RSI, Volume spikes, EMA crossovers</p>
-</div>
-""", unsafe_allow_html=True)
+st.caption("⚠️ Educational only. Desktop notifications need 'plyer' installed.")
